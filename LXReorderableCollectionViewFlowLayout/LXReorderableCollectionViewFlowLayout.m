@@ -307,13 +307,19 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
             
             self.selectedItemIndexPath = currentIndexPath;
             
+            CGFloat beforeOffsetY = self.collectionView.contentOffset.y;
+
             if ([self.delegate respondsToSelector:@selector(collectionView:layout:willBeginDraggingItemAtIndexPath:)]) {
                 [self.delegate collectionView:self.collectionView layout:self willBeginDraggingItemAtIndexPath:self.selectedItemIndexPath];
             }
             
             UICollectionViewCell *collectionViewCell = [self.collectionView cellForItemAtIndexPath:self.selectedItemIndexPath];
             
-            self.currentView = [[UIView alloc] initWithFrame:collectionViewCell.frame];
+            CGFloat afterOffsetY = self.collectionView.contentOffset.y;
+
+            CGRect frame = collectionViewCell.frame;
+            frame.origin.y += (afterOffsetY - beforeOffsetY);
+            self.currentView = [[UIView alloc] initWithFrame:frame];
             
             collectionViewCell.highlighted = YES;
             UIView *highlightedImageView = [collectionViewCell LX_snapshotView];
