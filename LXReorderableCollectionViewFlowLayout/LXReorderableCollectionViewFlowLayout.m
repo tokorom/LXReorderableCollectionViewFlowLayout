@@ -9,6 +9,8 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
+#define LX_FRAMES_PER_SECOND 60.0
+
 #ifndef CGGEOMETRY_LXSUPPORT_H_
 CG_INLINE CGPoint
 LXS_CGPointAdd(CGPoint point1, CGPoint point2) {
@@ -27,6 +29,10 @@ typedef NS_ENUM(NSInteger, LXScrollingDirection) {
 static NSString * const kLXScrollingDirectionKey = @"LXScrollingDirection";
 static NSString * const kLXCollectionViewKeyPath = @"collectionView";
 
+@interface UICollectionViewCell (Dragging)
+- (UIView *)draggingViewWithSize:(CGSize)size;
+@end
+
 @interface CADisplayLink (LX_userInfo)
 @property (nonatomic, copy) NSDictionary *LX_userInfo;
 @end
@@ -43,22 +49,18 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
 
 @interface UICollectionViewCell (LXReorderableCollectionViewFlowLayout)
 
-- (UIView *)LX_snapshotView;
+- (UIImage *)LX_rasterizedImage;
 
 @end
 
 @implementation UICollectionViewCell (LXReorderableCollectionViewFlowLayout)
 
-- (UIView *)LX_snapshotView {
-    if ([self respondsToSelector:@selector(snapshotViewAfterScreenUpdates:)]) {
-        return [self snapshotViewAfterScreenUpdates:YES];
-    } else {
-        UIGraphicsBeginImageContextWithOptions(self.bounds.size, self.isOpaque, 0.0f);
-        [self.layer renderInContext:UIGraphicsGetCurrentContext()];
-        UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
-        UIGraphicsEndImageContext();
-        return [[UIImageView alloc] initWithImage:image];
-    }
+- (UIImage *)LX_rasterizedImage {
+    UIGraphicsBeginImageContextWithOptions(self.bounds.size, self.isOpaque, 0.0f);
+    [self.layer renderInContext:UIGraphicsGetCurrentContext()];
+    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return image;
 }
 
 @end
@@ -107,30 +109,6 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleApplicationWillResignActive:) name: UIApplicationWillResignActiveNotification object:nil];
 }
 
-- (void)tearDownCollectionView {
-    // Tear down long press gesture
-    if (_longPressGestureRecognizer) {
-        UIView *view = _longPressGestureRecognizer.view;
-        if (view) {
-            [view removeGestureRecognizer:_longPressGestureRecognizer];
-        }
-        _longPressGestureRecognizer.delegate = nil;
-        _longPressGestureRecognizer = nil;
-    }
-    
-    // Tear down pan gesture
-    if (_panGestureRecognizer) {
-        UIView *view = _panGestureRecognizer.view;
-        if (view) {
-            [view removeGestureRecognizer:_panGestureRecognizer];
-        }
-        _panGestureRecognizer.delegate = nil;
-        _panGestureRecognizer = nil;
-    }
-    
-    [[NSNotificationCenter defaultCenter] removeObserver:self name:UIApplicationWillResignActiveNotification object:nil];
-}
-
 - (id)init {
     self = [super init];
     if (self) {
@@ -151,8 +129,8 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
 
 - (void)dealloc {
     [self invalidatesScrollTimer];
-    [self tearDownCollectionView];
     [self removeObserver:self forKeyPath:kLXCollectionViewKeyPath];
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:UIApplicationWillResignActiveNotification object:nil];
 }
 
 - (void)applyLayoutAttributes:(UICollectionViewLayoutAttributes *)layoutAttributes {
@@ -239,25 +217,24 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
     CGSize frameSize = self.collectionView.bounds.size;
     CGSize contentSize = self.collectionView.contentSize;
     CGPoint contentOffset = self.collectionView.contentOffset;
-    UIEdgeInsets contentInset = self.collectionView.contentInset;
     // Important to have an integer `distance` as the `contentOffset` property automatically gets rounded
     // and it would diverge from the view's center resulting in a "cell is slipping away under finger"-bug.
-    CGFloat distance = rint(self.scrollingSpeed * displayLink.duration);
+    CGFloat distance = rint(self.scrollingSpeed / LX_FRAMES_PER_SECOND);
     CGPoint translation = CGPointZero;
     
     switch(direction) {
         case LXScrollingDirectionUp: {
             distance = -distance;
-            CGFloat minY = 0.0f - contentInset.top;
+            CGFloat minY = 0.0f;
             
             if ((contentOffset.y + distance) <= minY) {
-                distance = -contentOffset.y - contentInset.top;
+                distance = -contentOffset.y;
             }
             
             translation = CGPointMake(0.0f, distance);
         } break;
         case LXScrollingDirectionDown: {
-            CGFloat maxY = MAX(contentSize.height, frameSize.height) - frameSize.height + contentInset.bottom;
+            CGFloat maxY = MAX(contentSize.height, frameSize.height) - frameSize.height;
             
             if ((contentOffset.y + distance) >= maxY) {
                 distance = maxY - contentOffset.y;
@@ -267,16 +244,16 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
         } break;
         case LXScrollingDirectionLeft: {
             distance = -distance;
-            CGFloat minX = 0.0f - contentInset.left;
+            CGFloat minX = 0.0f;
             
             if ((contentOffset.x + distance) <= minX) {
-                distance = -contentOffset.x - contentInset.left;
+                distance = -contentOffset.x;
             }
             
             translation = CGPointMake(distance, 0.0f);
         } break;
         case LXScrollingDirectionRight: {
-            CGFloat maxX = MAX(contentSize.width, frameSize.width) - frameSize.width + contentInset.right;
+            CGFloat maxX = MAX(contentSize.width, frameSize.width) - frameSize.width;
             
             if ((contentOffset.x + distance) >= maxX) {
                 distance = maxX - contentOffset.x;
@@ -313,21 +290,31 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
             
             UICollectionViewCell *collectionViewCell = [self.collectionView cellForItemAtIndexPath:self.selectedItemIndexPath];
             
-            self.currentView = [[UIView alloc] initWithFrame:collectionViewCell.frame];
+            UIImageView *highlightedImageView = nil;
+            UIImageView *imageView = nil;
+
+            UIView *draggingView = [collectionViewCell draggingViewWithSize:collectionViewCell.bounds.size];
+            if (nil != draggingView) {
+                draggingView.frame = collectionViewCell.frame;
+                [self.collectionView addSubview:draggingView];
+                self.currentView = draggingView;
+            } else {
+                self.currentView = [[UIView alloc] initWithFrame:collectionViewCell.frame];
+                
+                collectionViewCell.highlighted = YES;
+                highlightedImageView = [[UIImageView alloc] initWithImage:[collectionViewCell LX_rasterizedImage]];
+                highlightedImageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                highlightedImageView.alpha = 1.0f;
+                
+                collectionViewCell.highlighted = NO;
+                imageView = [[UIImageView alloc] initWithImage:[collectionViewCell LX_rasterizedImage]];
+                imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                imageView.alpha = 0.0f;
             
-            collectionViewCell.highlighted = YES;
-            UIView *highlightedImageView = [collectionViewCell LX_snapshotView];
-            highlightedImageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            highlightedImageView.alpha = 1.0f;
-            
-            collectionViewCell.highlighted = NO;
-            UIView *imageView = [collectionViewCell LX_snapshotView];
-            imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            imageView.alpha = 0.0f;
-            
-            [self.currentView addSubview:imageView];
-            [self.currentView addSubview:highlightedImageView];
-            [self.collectionView addSubview:self.currentView];
+                [self.currentView addSubview:imageView];
+                [self.currentView addSubview:highlightedImageView];
+                [self.collectionView addSubview:self.currentView];
+            }
             
             self.currentViewCenter = self.currentView.center;
             
@@ -335,11 +322,18 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
             [UIView
              animateWithDuration:0.3
              delay:0.0
-             options:UIViewAnimationOptionBeginFromCurrentState
+             options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowAnimatedContent
              animations:^{
                  __strong typeof(self) strongSelf = weakSelf;
                  if (strongSelf) {
                      strongSelf.currentView.transform = CGAffineTransformMakeScale(1.1f, 1.1f);
+/*                      CGPoint center = strongSelf.currentView.center;
+                     CGRect frame = strongSelf.currentView.frame;
+                     frame.size.width = frame.size.width * 1.1;
+                     frame.size.height = frame.size.height * 1.1;
+                     strongSelf.currentView.frame = frame;
+                     strongSelf.currentView.center = center;
+                     */
                      highlightedImageView.alpha = 0.0f;
                      imageView.alpha = 1.0f;
                  }
@@ -371,24 +365,27 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
                 
                 UICollectionViewLayoutAttributes *layoutAttributes = [self layoutAttributesForItemAtIndexPath:currentIndexPath];
                 
-                self.longPressGestureRecognizer.enabled = NO;
-                
+                 self.currentView.transform = CGAffineTransformMakeScale(1.0f, 1.0f);
+
                 __weak typeof(self) weakSelf = self;
                 [UIView
-                 animateWithDuration:0.3
+                 animateWithDuration:0.5
                  delay:0.0
-                 options:UIViewAnimationOptionBeginFromCurrentState
+                 usingSpringWithDamping:0.5
+                 initialSpringVelocity:0.0
+                 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowAnimatedContent
                  animations:^{
                      __strong typeof(self) strongSelf = weakSelf;
                      if (strongSelf) {
-                         strongSelf.currentView.transform = CGAffineTransformMakeScale(1.0f, 1.0f);
-                         strongSelf.currentView.center = layoutAttributes.center;
+                         CGRect frame = strongSelf.currentView.frame;
+                         CGSize size = layoutAttributes.bounds.size;
+                         frame.origin.x = layoutAttributes.center.x - size.width / 2;
+                         frame.origin.y = layoutAttributes.center.y - size.height / 2;
+                         frame.size = size;
+                         strongSelf.currentView.frame = frame;
                      }
                  }
                  completion:^(BOOL finished) {
-                     
-                     self.longPressGestureRecognizer.enabled = YES;
-                     
                      __strong typeof(self) strongSelf = weakSelf;
                      if (strongSelf) {
                          [strongSelf.currentView removeFromSuperview];
@@ -514,7 +511,6 @@ static NSString * const kLXCollectionViewKeyPath = @"collectionView";
             [self setupCollectionView];
         } else {
             [self invalidatesScrollTimer];
-            [self tearDownCollectionView];
         }
     }
 }
